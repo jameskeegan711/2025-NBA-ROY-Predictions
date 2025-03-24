@@ -1,0 +1,558 @@
+---
+title: "DSE 6620 Final ROY"
+author: "James Keegan"
+date: "2025-03-03"
+output: html_document
+---
+
+# Loading Libraries
+
+```{R}
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(stats)
+library(ggplot2)
+library(corrplot)
+library(here)
+library(ggthemes)
+library(hoopR)
+library(rvest)
+library(dplyr)
+library(janitor)
+library(stringr)
+library(stringi)
+library(randomForest)
+
+```
+
+# ROY Historical Data
+
+```{R}
+get_roy_data <- function(year) {
+  url <- paste0("https://www.basketball-reference.com/awards/awards_", year, ".html")
+ 
+  page <- read_html(url)
+  
+  roy_table <- page %>% html_nodes("table") %>% .[2] %>% html_table(fill = TRUE) %>% .[[1]]
+ 
+  colnames(roy_table) <- as.character(unlist(roy_table[1, ]))
+  roy_table <- roy_table[-1, ] 
+ 
+  roy_table <- roy_table %>%
+    mutate(Year = year)
+ 
+  return(roy_table)
+}
+
+years <- 2004:2024  
+roy_data <- bind_rows(lapply(years, get_roy_data))  
+
+head(roy_data)
+
+```
+
+```{R}
+# Loading Game Stats from 2004-2024
+nba_players <- hoopR::load_nba_player_box(season = 2004:2024)
+
+advanced_stats <- nba_players %>%
+  filter(season_type == 2) %>%  
+  group_by(season, athlete_id, athlete_display_name) %>%  
+  summarise(
+    TS = sum(points, na.rm = TRUE) / (2 * (sum(field_goals_attempted, na.rm = TRUE) 
+                                           + 0.44 * sum(free_throws_attempted, na.rm = TRUE))), 
+    AST_TOV = sum(assists, na.rm = TRUE) / sum(turnovers, na.rm = TRUE) 
+  ) %>%
+  ungroup() %>%
+  arrange(desc(season), desc(TS))
+head(advanced_stats)
+
+```
+
+```{R}
+roy_data <- roy_data %>%
+  mutate(Player = stri_trans_general(Player, "Latin-ASCII"))
+
+# Merging the two data frames
+merged_roy_data <- roy_data %>%
+  left_join(advanced_stats, by = c("Year" = "season", "Player" = "athlete_display_name")) %>%
+  rename(Pts_Won = `Pts Won`, Pts_Max = `Pts Max`, FG_Percent = `FG%`, Percent_3 = `3P%`, FT_Percent = `FT%`, WS_48 = `WS/48`) %>%
+  mutate_all(~replace(., . == "", ".000")) %>%
+  dplyr::select(-First, -Pts_Won, -Pts_Max, -Share)
+
+merged_roy_data$Rank = gsub("T", "", merged_roy_data$Rank)
+  
+print(merged_roy_data)
+
+```
+
+```{R}
+# Changing variable types from characters to numeric
+merged_roy_data = merged_roy_data %>%
+  mutate(Rank = as.numeric(merged_roy_data$Rank),
+         Age = as.numeric(merged_roy_data$Age),
+         G = as.numeric(merged_roy_data$G),
+         MP = as.numeric(merged_roy_data$MP),
+         PTS = as.numeric(merged_roy_data$PTS),
+         TRB = as.numeric(merged_roy_data$TRB),
+         AST = as.numeric(merged_roy_data$AST),
+         STL = as.numeric(merged_roy_data$STL),
+         BLK = as.numeric(merged_roy_data$BLK),
+         FG_Percent = as.numeric(merged_roy_data$FG_Percent),
+         Percent_3 = as.numeric(merged_roy_data$Percent_3),
+         FT_Percent = as.numeric(merged_roy_data$FT_Percent),
+         WS = as.numeric(merged_roy_data$WS),
+         WS_48 = as.numeric(merged_roy_data$WS_48),
+         Year = as.numeric(merged_roy_data$Year),
+         TS = as.numeric(merged_roy_data$TS),
+         AST_TOV = as.numeric(merged_roy_data$AST_TOV)) %>%
+  filter(Rank <= 8)
+
+print(merged_roy_data)
+
+```
+
+# 2025 Top 8 ROY Players Stats
+
+```{R}
+url_2025 <- "https://www.basketball-reference.com/leagues/NBA_2025_per_game.html"
+webpage <- read_html(url_2025)
+
+stats_2025 <- webpage %>%
+  html_nodes("table") %>%    
+  .[[1]] %>%
+  html_table(fill = TRUE)
+print(stats_2025)
+
+```
+
+```{R}
+stats_2025 <- stats_2025 %>%
+  mutate(Player = stri_trans_general(Player, "Latin-ASCII"))
+
+roy_players = c("Kel'el Ware", "Jaylen Wells", "Stephon Castle", "Zaccharie Risacher", "Zach Edey", "Alex Sarr", "Dalton Knecht", "Yves Missi")
+
+roy_players_stats = stats_2025 %>%
+  filter(Player %in% roy_players)
+
+print(roy_players_stats)
+
+```
+
+# ROY Cluster 1
+
+```{R}
+roy_train_data <- merged_roy_data %>% filter(Year != 2024)
+roy_validation <- merged_roy_data %>% filter(Year == 2024)
+
+```
+
+```{R}
+# Hierarchical Clustering
+roy_train.data <- as.matrix(roy_train_data[, c("PTS", "TRB", "AST")])
+roy_data.scaled <- scale(roy_train.data)
+
+roy_data.dist <- dist(roy_data.scaled)
+roy_data.hclust <- hclust(d = roy_data.dist, method = "complete")
+plot(roy_data.hclust)
+abline(h = 4, lty = 2)
+
+```
+
+```{R}
+# Cluster Creation
+roy_data.hclust.clusters <- cutree(roy_data.hclust, k = 6)
+roy_data_clust <- data.frame(roy_data.hclust.clusters = as.character(roy_data.hclust.clusters))
+
+roy_cluster_summary <- roy_train_data %>%
+  bind_cols(roy_data_clust) %>%
+  group_by(roy_data.hclust.clusters) %>%
+  summarise(
+    PTS = mean(PTS),
+    AST = mean(AST),
+    TRB = mean(TRB),
+    count = n()
+  )
+
+print(roy_cluster_summary)
+
+```
+
+```{R}
+# Update clusters
+roy_data_updated <- roy_train_data %>%
+  bind_cols(roy_data_clust) %>%
+  mutate(roy_data.hclust.clusters = case_when(
+    roy_data.hclust.clusters == "2" ~ "1",
+    TRUE ~ roy_data.hclust.clusters
+  ))
+
+roy_cluster_summary_updated <- roy_data_updated %>%
+  group_by(roy_data.hclust.clusters) %>%
+  summarise(
+    PTS = mean(PTS),
+    AST = mean(AST),
+    TRB = mean(TRB),
+    count = n()
+  )
+print(roy_cluster_summary_updated)
+
+```
+
+```{R}
+# Creating a new, descriptive column for each cluster and adding it to the historical data
+lookup <- tibble(
+  roy_type_index = as.character(1:6),
+  roy_types = c("High PTS & TRB", "", "Average PTS,AST,TRB","Low PTS,AST", "Low PTS,AST,TRB", "Average PTS & Low AST,TRB")
+)
+
+roy_data_final <- roy_data_updated %>%
+  inner_join(lookup, by = c("roy_data.hclust.clusters" = "roy_type_index"))
+
+print(roy_data_final)
+
+```
+
+# ROY Cluster 2
+
+```{R}
+# Hierarchical Clustering
+roy_train_data_2 <- merged_roy_data %>% filter(Year < 2024)
+roy_validation_2 <- merged_roy_data %>% filter(Year >= 2024)
+
+roy_train.data_2 <- as.matrix(roy_train_data[, c("FG_Percent", "Percent_3", "FT_Percent")])
+roy_data.scaled_2 <- scale(roy_train.data_2)
+
+roy_data.dist_2 <- dist(roy_data.scaled_2)
+roy_data.hclust_2 <- hclust(d = roy_data.dist_2, method = "complete")
+plot(roy_data.hclust_2)
+abline(h = 4, lty = 2)
+
+```
+
+```{R}
+# Cluster Creation
+roy_data.hclust.clusters_2 <- cutree(roy_data.hclust_2, k = 5)
+roy_data_clust_2 <- data.frame(roy_data.hclust.clusters_2 = as.character(roy_data.hclust.clusters_2))
+
+roy_cluster_summary_2 <- roy_train_data_2 %>%
+  bind_cols(roy_data_clust_2) %>%
+  group_by(roy_data.hclust.clusters_2) %>%
+  summarise(
+    FG_Percent = mean(FG_Percent),
+    Percent_3 = mean(Percent_3),
+    FT_Percent = mean(FT_Percent),
+    count = n()
+  )
+
+print(roy_cluster_summary_2)
+
+```
+
+```{R}
+# Update clusters
+roy_data_updated_2 <- roy_train_data_2 %>%
+  bind_cols(roy_data_clust_2) %>%
+  mutate(roy_data.hclust.clusters_2 = case_when(
+    roy_data.hclust.clusters_2 == "5" ~ "2",
+    TRUE ~ roy_data.hclust.clusters_2
+  ))
+
+roy_cluster_summary_updated_2 <- roy_data_updated_2 %>%
+  group_by(roy_data.hclust.clusters_2) %>%
+  summarise(
+    FG_Percent = mean(FG_Percent),
+    Percent_3 = mean(Percent_3),
+    FT_Percent = mean(FT_Percent),
+    count = n()
+  )
+print(roy_cluster_summary_updated_2)
+
+```
+
+```{R}
+# Creating a new, descriptive column for each cluster and adding it to the historical data
+lookup <- tibble(
+  roy_type_index_2 = as.character(1:4),
+  roy_types_2 = c("Low FG% & High FT%", "Low 3pt% & Average FG%,FT%", "Average FG% & High FT%", "High FG%,3pt% & Low FT%")
+)
+
+roy_data_final_2 <- roy_data_updated_2 %>%
+  inner_join(lookup, by = c("roy_data.hclust.clusters_2" = "roy_type_index_2"))
+
+print(roy_data_final_2)
+
+```
+
+# ROY Cluster 3
+
+```{R}
+# Hierarchical Clustering
+roy_train_data_3 <- merged_roy_data %>% filter(Year < 2024)
+roy_validation_3 <- merged_roy_data %>% filter(Year >= 2024)
+
+roy_train.data_3 <- as.matrix(roy_train_data[, c("WS_48", "TS", "AST_TOV")])
+roy_data.scaled_3 <- scale(roy_train.data_3)
+
+roy_data.dist_3 <- dist(roy_data.scaled_3)
+roy_data.hclust_3 <- hclust(d = roy_data.dist_3, method = "complete")
+plot(roy_data.hclust_3)
+abline(h = 4, lty = 2)
+
+```
+
+```{R}
+# Cluster Creation
+roy_data.hclust.clusters_3 <- cutree(roy_data.hclust_3, k = 6)
+roy_data_clust_3 <- data.frame(roy_data.hclust.clusters_3 = as.character(roy_data.hclust.clusters_3))
+
+roy_cluster_summary_3 <- roy_train_data_3 %>%
+  bind_cols(roy_data_clust_3) %>%
+  group_by(roy_data.hclust.clusters_3) %>%
+  summarise(
+    WS_48 = mean(WS_48),
+    TS = mean(TS, na.rm = TRUE),
+    AST_TOV = mean(AST_TOV, na.rm = TRUE),
+    count = n()
+  )
+
+print(roy_cluster_summary_3)
+
+```
+
+```{R}
+# Update clusters
+roy_data_updated_3 <- roy_train_data_3 %>%
+  bind_cols(roy_data_clust_3) %>%
+  mutate(roy_data.hclust.clusters_3 = case_when(
+    roy_data.hclust.clusters_3 == "5" ~ "1",
+    roy_data.hclust.clusters_3 == "4" ~ "3",
+    TRUE ~ roy_data.hclust.clusters_3
+  ))
+
+roy_cluster_summary_updated_3 <- roy_data_updated_3 %>%
+  group_by(roy_data.hclust.clusters_3) %>%
+  summarise(
+    WS_48 = mean(WS_48),
+    TS = mean(TS, na.rm = TRUE),
+    AST_TOV = mean(AST_TOV, na.rm = TRUE),
+    count = n()
+  )
+print(roy_cluster_summary_updated_3)
+
+```
+
+```{R}
+# Creating a new, descriptive column for each cluster and adding it to the historical data
+lookup <- tibble(
+  roy_type_index_3 = as.character(1:6),
+  roy_types_3 = c("Low WS/48,TS & High AST_TOV", "Low WS/48,AST_TOV & Average TS", "Average WS_48,TS,AST_TOV","", "", "High WS/48,TS & Low AST_TOV")
+)
+
+roy_data_final_3 <- roy_data_updated_3 %>%
+  inner_join(lookup, by = c("roy_data.hclust.clusters_3" = "roy_type_index_3")) %>%
+
+print(roy_data_final_3)
+
+```
+
+# ROY Model 1 Creation
+
+```{R}
+# Creating new data frame to run model
+roy_exclude_data = roy_data_final %>%
+  dplyr::select(-Player, -Tm, -athlete_id, -roy_data.hclust.clusters)
+
+roy_exclude_data$roy_types = as.factor(roy_exclude_data$roy_types)
+
+# re-training the data
+lm_roy_train_data <- roy_exclude_data %>% filter(Year != 2023)
+lm_roy_validation <- roy_exclude_data %>% filter(Year == 2023)
+
+```
+
+```{R}
+roy_lm_model <- lm(Rank ~ ., data = lm_roy_train_data)
+summary(roy_lm_model)
+
+```
+
+```{R}
+# Calculating MSE
+roy_predictions <- predict(roy_lm_model, newdata = lm_roy_validation)
+
+roy_mse = mean((lm_roy_validation$Rank - roy_predictions)^2)
+print(roy_mse)
+
+```
+
+# ROY Model 2 Creation
+
+```{R}
+# Creating new data frame to run model
+roy_exclude_data_2 = roy_data_final_2 %>%
+  dplyr::select(-Player, -Tm, -athlete_id, -roy_data.hclust.clusters_2)
+
+roy_exclude_data_2$roy_types_2 = as.factor(roy_exclude_data_2$roy_types_2)
+
+# re-training the data
+lm_roy_train_data_2 <- roy_exclude_data_2 %>% filter(Year != 2023)
+lm_roy_validation_2 <- roy_exclude_data_2 %>% filter(Year == 2023)
+
+```
+
+```{R}
+roy_lm_model_2 <- lm(Rank ~ ., data = lm_roy_train_data_2)
+summary(roy_lm_model_2)
+
+```
+
+```{R}
+# Calculating MSE
+roy_predictions_2 <- predict(roy_lm_model_2, newdata = lm_roy_validation_2)
+
+roy_mse_2 = mean((lm_roy_validation_2$Rank - roy_predictions_2)^2)
+print(roy_mse_2)
+
+```
+
+# ROY Model 3 Creation
+
+```{R}
+# Creating new data frame to run model
+roy_exclude_data_3 = roy_data_final_3 %>%
+  dplyr::select(-Player, -Tm, -athlete_id, -roy_data.hclust.clusters_3)
+
+roy_exclude_data_3$roy_types_3 = as.factor(roy_exclude_data_3$roy_types_3)
+
+# re-training the data
+lm_roy_train_data_3 <- roy_exclude_data_3 %>% filter(Year != 2023)
+lm_roy_validation_3 <- roy_exclude_data_3 %>% filter(Year == 2023)
+
+```
+
+```{R}
+roy_lm_model_3 <- lm(Rank ~ ., data = lm_roy_train_data_3)
+summary(roy_lm_model_3)
+
+```
+
+```{R}
+# Calculating MSE
+roy_predictions_3 <- predict(roy_lm_model_3, newdata = lm_roy_validation_3)
+
+roy_mse_3 = mean((lm_roy_validation_3$Rank - roy_predictions_3)^2)
+print(roy_mse_3)
+
+```
+# Applying the 2025 Stats to Model
+
+```{R}
+updated_roy_players_stats = roy_players_stats %>%
+  mutate(
+    WS = mean(merged_roy_data$WS),
+    WS_48 = mean(merged_roy_data$WS_48),
+    TS = PTS / (2 * (FGA + 0.44 * FTA)), 
+    AST_TOV = AST/TOV,
+    Year = 2025)
+updated_roy_players_stats
+
+```
+
+# Model 1 Creation
+
+```{R}
+# Preparing Data
+roy_players = updated_roy_players_stats %>%
+  rename(FG_Percent = `FG%`,
+         Percent_3 = `3P%`,
+         FT_Percent = `FT%`) %>%
+  dplyr::select(Age, G, MP, PTS, TRB, AST, STL, BLK, FG_Percent, Percent_3, FT_Percent, Year, WS, WS_48, TS, AST_TOV)
+
+roy_player_type = c("Average PTS & Low AST,TRB", "Low PTS,AST,TRB", "Low PTS,AST,TRB", "Low PTS,AST,TRB", "Low PTS,AST,TRB", "Low PTS,AST,TRB", "Low PTS,AST,TRB", "Low PTS,AST,TRB")
+
+roy_players$roy_types = roy_player_type
+
+roy_players
+
+```
+
+```{R}
+# Predicting rank
+roy_predicted_ranks <- predict(roy_lm_model, newdata = roy_players)
+
+roy_players_stats$Predicted_Rank <- roy_predicted_ranks
+roy_players_stats
+
+```
+
+# Model 2 Creation
+
+```{R}
+# Preparing Data
+roy_players_2 = updated_roy_players_stats %>%
+  rename(FG_Percent = `FG%`,
+         Percent_3 = `3P%`,
+         FT_Percent = `FT%`) %>%
+  dplyr::select(Age, G, MP, PTS, TRB, AST, STL, BLK, FG_Percent, Percent_3, FT_Percent, Year, WS, WS_48, TS, AST_TOV)
+
+roy_player_type_2 = c("Low FG% & High FT%", "Low FG% & High FT%", "Low FG% & High FT%", "Low FG% & High FT%", "Average FG% & High FT%", "Low FG% & High FT%", "Average FG% & High FT%", "Low 3pt% & Average FG%,FT%")
+
+roy_players_2$roy_types_2 = roy_player_type_2
+
+roy_players_2
+
+```
+
+```{R}
+# Predicting rank
+roy_predicted_ranks_2 <- predict(roy_lm_model_2, newdata = roy_players_2)
+
+roy_players_stats$Predicted_Rank_2 <- roy_predicted_ranks_2
+roy_players_stats
+
+```
+
+# Model 3 Creation and Final Weighted Average Rank
+
+```{R}
+# Preparing Data
+roy_players_3 = updated_roy_players_stats %>%
+  rename(FG_Percent = `FG%`,
+         Percent_3 = `3P%`,
+         FT_Percent = `FT%`) %>%
+  dplyr::select(Age, G, MP, PTS, TRB, AST, STL, BLK, FG_Percent, Percent_3, FT_Percent, Year, WS, WS_48, TS, AST_TOV)
+
+roy_player_type_3 = c("Low WS/48,TS & High AST_TOV", "Low WS/48,TS & High AST_TOV", "Low WS/48,AST_TOV & Average TS", "Average WS_48,TS,AST_TOV", "High WS/48,TS & Low AST_TOV", "Average WS_48,TS,AST_TOV", "Average WS_48,TS,AST_TOV", "Average WS_48,TS,AST_TOV")
+
+roy_players_3$roy_types_3 = roy_player_type_3
+
+roy_players_3
+
+```
+
+```{R}
+# Predicting rank
+roy_predicted_ranks_3 <- predict(roy_lm_model_3, newdata = roy_players_3)
+
+roy_players_stats$Predicted_Rank_3 <- roy_predicted_ranks_3
+
+# Setting weights based on MSE
+roy_weight = 1/roy_mse
+roy_weight_2 = 1/roy_mse_2
+roy_weight_3 = 1/roy_mse_3
+roy_total_weight = roy_weight + roy_weight_2 + roy_weight_3
+
+roy_normalized_weight = roy_weight / roy_total_weight
+roy_normalized_weight_2 = roy_weight_2 / roy_total_weight
+roy_normalized_weight_3 = roy_weight_3 / roy_total_weight
+
+# Applying weights to averages and finding a true weighted average
+roy_players_stats = roy_players_stats %>%
+  mutate(Average_Rank = (Predicted_Rank * roy_normalized_weight) + (Predicted_Rank_2 * roy_normalized_weight_2) + (Predicted_Rank_3 * roy_normalized_weight_3)) %>%
+  arrange(Average_Rank) %>%
+  dplyr::select(Player, Predicted_Rank, Predicted_Rank_2, Predicted_Rank_3, Average_Rank)
+roy_players_stats
+
+```
